@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>練習日程表メーカー</title>
-<link rel="icon" href="../favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <!-- Excel生成ライブラリ（セル結合・塗りつぶし・罫線・印刷設定に対応） -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <style>
@@ -135,7 +133,7 @@
 <header>
   <div class="frame">
     <h1>練習日程表メーカー</h1>
-    <div class="sheetinfo num">SHEET: <span id="hdMonth">—</span>｜OUTPUT: A4横・1枚｜FORMAT: .xlsx</div>
+    <div class="sheetinfo num">SHEET: <span id="hdMonth">—</span>｜OUTPUT: A4横・1枚｜FORMAT: .xlsx / .ics</div>
   </div>
 </header>
 
@@ -148,14 +146,12 @@
     <button class="ghost" id="btnAddRow">＋ 行を追加</button>
     <button class="ghost" id="btnRegen">パターンから再生成</button>
     <button class="ghost" id="btnSettings">⚙ 設定</button>
+    <button class="ghost" id="btnIcs">カレンダー出力</button>
     <button class="primary" id="btnExcel">Excelダウンロード</button>
   </div>
 
   <div class="sheetwrap" id="sheetwrap"></div>
   <p class="hint">行をタップすると、その日の時間変更・休み・削除などの編集ができます。編集内容は月ごとに自動保存されます。</p>
-  <footer style="margin:24px 0 8px; text-align:center; font-size:.72rem; color:#5a6572;">
-    端末内処理（設定・日程はこのブラウザにのみ保存）／ <a href="https://kreatio-works.github.io/" style="color:inherit;">kreatio-works</a>
-  </footer>
 </main>
 
 <!-- ===== 行編集モーダル ===== -->
@@ -229,6 +225,36 @@
       <span class="spacer"></span>
       <button class="ghost" id="btnSetCancel">閉じる</button>
       <button class="primary" id="btnSetSave">保存する</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== カレンダー出力モーダル ===== -->
+<div class="overlay" id="ovIcs">
+  <div class="modal">
+    <h2>カレンダー出力（.ics）</h2>
+    <p class="hint">スマホの標準カレンダーやGoogleカレンダーに取り込めるファイルを作ります。保護者や道場生には、必要な道場だけを選んだファイルを渡せます。</p>
+    <div id="icsDojos"></div>
+    <div class="frow"><label><input type="checkbox" id="icsText" checked> 結合の行（合同練習・大会など）も含める</label></div>
+    <div class="btnrow">
+      <span class="spacer"></span>
+      <button class="ghost" id="btnIcsCancel">キャンセル</button>
+      <button class="primary" id="btnIcsOk">作成</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 配布用説明文モーダル ===== -->
+<div class="overlay" id="ovGuide">
+  <div class="modal">
+    <h2>LINE配布用の説明文</h2>
+    <p class="hint">.icsファイルと一緒にこの文章を送ると、受け取った人が自分で取り込めます。文面は自由に書き換えてから「コピー」してください。</p>
+    <textarea id="guideText" style="min-height:18em; font-size:.8rem;"></textarea>
+    <p class="hint">【送る側のポイント】LINEでは「＋」→「ファイル」から.icsを添付します（写真としてではなくファイルとして送るのが確実です）。グループの「ノート」に載せておくと、後から入った人も見返せます。</p>
+    <div class="btnrow">
+      <span class="spacer"></span>
+      <button class="ghost" id="btnGuideClose">閉じる</button>
+      <button class="primary" id="btnGuideCopy">説明文をコピー</button>
     </div>
   </div>
 </div>
@@ -353,11 +379,17 @@ function render(){
     if(r.type === "text"){
       h += `<td colspan="${nd*2}">${esc(r.text)}</td>`;
     } else {
-      settings.dojos.forEach(d => {
-        const c = r.cells[d.id];
-        if(c && c.off)      h += `<td class="off" colspan="2">休 み</td>`;
-        else if(c)          h += `<td class="num">${esc(c.time)}</td><td>${esc(c.place)}</td>`;
-        else                h += `<td></td><td></td>`;
+      buildSegments(r).forEach(sg => {
+        if(sg.joint){
+          const g = sg.joint;
+          if(g.off) h += `<td class="off" colspan="${sg.span*2}">休 み</td>`;
+          else      h += `<td colspan="${sg.span*2}"><span class="num">${esc(g.time||"")}</span>　${esc(g.place||"")}</td>`;
+        } else {
+          const c = r.cells[sg.dojo.id];
+          if(c && c.off)      h += `<td class="off" colspan="2">休 み</td>`;
+          else if(c)          h += `<td class="num">${esc(c.time)}</td><td>${esc(c.place)}</td>`;
+          else                h += `<td></td><td></td>`;
+        }
       });
     }
     h += `</tr>`;
@@ -375,6 +407,27 @@ function render(){
   wrap.querySelectorAll("tr.rowclick").forEach(tr => tr.onclick = () => openRowModal(tr.dataset.id));
 }
 function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* 合同（まとめ）グループを考慮して、行を左から順の区切りに分解する。
+   隣り合う道場が同じグループなら1つの結合セルにまとめる。
+   離れた位置の道場が同じグループの場合は、区間ごとに同じ内容を表示する。 */
+function buildSegments(r){
+  const joints = r.joints || [];
+  const gOf = id => joints.find(g => g.dojoIds && g.dojoIds.includes(id));
+  const segs = [];
+  for(let i = 0; i < settings.dojos.length; i++){
+    const g = gOf(settings.dojos[i].id);
+    if(g){
+      let span = 1;
+      while(i + span < settings.dojos.length && gOf(settings.dojos[i+span].id) === g) span++;
+      segs.push({ joint: g, span });
+      i += span - 1;
+    } else {
+      segs.push({ dojo: settings.dojos[i] });
+    }
+  }
+  return segs;
+}
 
 /* ---------- 行編集 ---------- */
 let editingId = null;
@@ -399,10 +452,50 @@ function openRowModal(id){
         <div class="frow"><label>場所</label><input type="text" class="edPlace" value="${esc(c.place)}"></div>
         <div class="frow"><label><input type="checkbox" class="edOff" ${c.off?"checked":""}> 休みと表示する</label></div>
       </div>`;
-    }).join("");
+    }).join("")
+      + `<h3>合同練習・まとめ表示</h3>
+         <p class="hint">複数の道場を1つのセルにまとめて表示します。まとめに含めた道場は、上の個別入力より優先されます（2道場以上で有効）。</p>
+         <div id="jointArea"></div>
+         <button class="ghost" id="btnAddJoint" type="button">＋ まとめグループを追加</button>`;
+    renderJointArea(structuredClone(r.joints || []));
   }
   document.getElementById("ovRow").classList.add("show");
 }
+/* --- 合同（まとめ）グループの編集UI --- */
+let editJoints = [];
+function renderJointArea(joints){
+  editJoints = joints;
+  const area = document.getElementById("jointArea");
+  if(!area) return;
+  area.innerHTML = editJoints.map((g, gi) => `
+    <div class="cellblock" data-gi="${gi}">
+      <div class="frow">${settings.dojos.map(d =>
+        `<label class="mini"><input type="checkbox" class="jD" value="${d.id}" ${g.dojoIds.includes(d.id)?"checked":""}> ${esc(d.name)}</label>`).join("")}</div>
+      <div class="frow"><label>時間</label><input type="text" class="jTime num" value="${esc(g.time||"")}" placeholder="18:00～20:00"></div>
+      <div class="frow"><label>場所</label><input type="text" class="jPlace" value="${esc(g.place||"")}"></div>
+      <div class="frow"><label><input type="checkbox" class="jOff" ${g.off?"checked":""}> 休みと表示</label><span class="spacer"></span><button class="danger jDel" type="button">×</button></div>
+    </div>`).join("");
+  area.querySelectorAll(".jDel").forEach(b => b.onclick = e => {
+    const gi = +e.target.closest(".cellblock").dataset.gi;
+    collectJoints(); editJoints.splice(gi, 1); renderJointArea(editJoints);
+  });
+  const add = document.getElementById("btnAddJoint");
+  if(add) add.onclick = () => {
+    collectJoints();
+    editJoints.push({ dojoIds: [], time: "", place: "", off: false });
+    renderJointArea(editJoints);
+  };
+}
+function collectJoints(){
+  document.querySelectorAll("#jointArea > .cellblock").forEach((b, gi) => {
+    const g = editJoints[gi];
+    g.dojoIds = [...b.querySelectorAll(".jD")].filter(x => x.checked).map(x => x.value);
+    g.time  = b.querySelector(".jTime").value.trim();
+    g.place = b.querySelector(".jPlace").value.trim();
+    g.off   = b.querySelector(".jOff").checked;
+  });
+}
+
 document.getElementById("btnRowCancel").onclick = () => document.getElementById("ovRow").classList.remove("show");
 document.getElementById("btnRowSave").onclick = () => {
   const r = months[monthKey()].rows.find(x => x.id === editingId);
@@ -411,8 +504,10 @@ document.getElementById("btnRowSave").onclick = () => {
   if(r.type === "text"){
     r.text = document.getElementById("edText").value;
   } else {
+    collectJoints();
+    r.joints = editJoints.filter(g => g.dojoIds.length >= 2);
     r.cells = {};
-    document.querySelectorAll("#rowBody .cellblock").forEach(b => {
+    document.querySelectorAll("#rowBody .cellblock[data-dojo]").forEach(b => {
       const time = b.querySelector(".edTime").value.trim();
       const place = b.querySelector(".edPlace").value.trim();
       const off = b.querySelector(".edOff").checked;
@@ -649,16 +744,24 @@ document.getElementById("btnExcel").onclick = async () => {
       ws.mergeCells(rn,3,rn,totalCols);
       ws.getCell(rn,3).value = r.text;
     } else {
-      settings.dojos.forEach((d,i) => {
-        const c1 = 3 + i*2;
-        const cell = r.cells[d.id];
-        if(cell && cell.off){
-          ws.mergeCells(rn,c1,rn,c1+1);
-          ws.getCell(rn,c1).value = "休 み";
-        } else if(cell){
-          ws.getCell(rn,c1).value = cell.time;
-          ws.getCell(rn,c1+1).value = cell.place;
+      let c1 = 3;
+      buildSegments(r).forEach(sg => {
+        const w = sg.joint ? sg.span*2 : 2;
+        if(sg.joint){
+          ws.mergeCells(rn, c1, rn, c1+w-1);
+          ws.getCell(rn, c1).value = sg.joint.off ? "休 み"
+            : [sg.joint.time, sg.joint.place].filter(Boolean).join("　");
+        } else {
+          const cell = r.cells[sg.dojo.id];
+          if(cell && cell.off){
+            ws.mergeCells(rn, c1, rn, c1+1);
+            ws.getCell(rn, c1).value = "休 み";
+          } else if(cell){
+            ws.getCell(rn, c1).value = cell.time;
+            ws.getCell(rn, c1+1).value = cell.place;
+          }
         }
+        c1 += w;
       });
     }
     for(let c=1;c<=totalCols;c++){
@@ -702,6 +805,129 @@ document.getElementById("btnExcel").onclick = async () => {
   a.download = `練習日程表_${wareki(curY)}${curM}月度.xlsx`;
   a.click(); URL.revokeObjectURL(a.href);
   toast("Excelファイルを作成しました");
+};
+
+/* =====================================================
+   カレンダー出力（.ics）
+   スマホの標準カレンダーやGoogleカレンダーに取り込める形式。
+   時間はタイムゾーン（Asia/Tokyo）付きで出力する。
+   ===================================================== */
+const ovIcs = document.getElementById("ovIcs");
+document.getElementById("btnIcs").onclick = () => {
+  if(settings.dojos.length === 0){ alert("先に「設定」で道場を登録してください。"); return; }
+  document.getElementById("icsDojos").innerHTML = settings.dojos.map(d =>
+    `<div class="frow"><label><input type="checkbox" class="icsD" value="${d.id}" checked> ${esc(d.name)}</label></div>`).join("");
+  ovIcs.classList.add("show");
+};
+document.getElementById("btnIcsCancel").onclick = () => ovIcs.classList.remove("show");
+
+const pad2 = n => String(n).padStart(2, "0");
+const escICS = s => (s||"").replace(/\\/g,"\\\\").replace(/;/g,"\\;").replace(/,/g,"\\,").replace(/\n/g,"\\n");
+/* 「19:00～21:00」のような文字列から開始・終了時刻を取り出す */
+function parseTime(str){
+  const m = (str||"").match(/(\d{1,2}):(\d{2})\s*[～~\-〜]\s*(\d{1,2}):(\d{2})/);
+  return m ? { s:[+m[1],+m[2]], e:[+m[3],+m[4]] } : null;
+}
+
+document.getElementById("btnIcsOk").onclick = () => {
+  const sel = new Set([...document.querySelectorAll(".icsD")].filter(x => x.checked).map(x => x.value));
+  const withText = document.getElementById("icsText").checked;
+  const rows = months[monthKey()].rows.slice().sort((a,b)=> a.date-b.date || a.order-b.order);
+  const stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"");
+  const L = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//nittei-maker//JP","CALSCALE:GREGORIAN",
+    "BEGIN:VTIMEZONE","TZID:Asia/Tokyo","BEGIN:STANDARD","DTSTART:19700101T000000",
+    "TZOFFSETFROM:+0900","TZOFFSETTO:+0900","TZNAME:JST","END:STANDARD","END:VTIMEZONE"];
+  let n = 0;
+  /* 1件の予定を追加（時刻が読み取れない場合は終日予定にする） */
+  const push = (date, t, summary, place) => {
+    const d8 = `${curY}${pad2(curM)}${pad2(date)}`;
+    L.push("BEGIN:VEVENT", `UID:${d8}-${++n}@nittei-maker`, `DTSTAMP:${stamp}`);
+    if(t){
+      L.push(`DTSTART;TZID=Asia/Tokyo:${d8}T${pad2(t.s[0])}${pad2(t.s[1])}00`);
+      L.push(`DTEND;TZID=Asia/Tokyo:${d8}T${pad2(t.e[0])}${pad2(t.e[1])}00`);
+    } else {
+      const next = new Date(curY, curM-1, date+1);
+      L.push(`DTSTART;VALUE=DATE:${d8}`);
+      L.push(`DTEND;VALUE=DATE:${next.getFullYear()}${pad2(next.getMonth()+1)}${pad2(next.getDate())}`);
+    }
+    L.push(`SUMMARY:${escICS(summary)}`);
+    if(place) L.push(`LOCATION:${escICS(place)}`);
+    L.push("END:VEVENT");
+  };
+
+  rows.forEach(r => {
+    if(r.type === "text"){
+      /* 結合行：休みは予定にしない。時刻が書かれていれば時間つき予定に */
+      if(withText && (r.text||"").trim() && !/^休\s*み$/.test(r.text.trim())){
+        push(r.date, parseTime(r.text), r.text.trim(), "");
+      }
+      return;
+    }
+    const done = new Set();
+    (r.joints || []).forEach(g => {
+      g.dojoIds.forEach(id => done.add(id));   // まとめ済みの道場は個別に出さない
+      if(g.off || !g.dojoIds.some(id => sel.has(id))) return;
+      const names = settings.dojos.filter(d => g.dojoIds.includes(d.id)).map(d => d.name);
+      push(r.date, parseTime(g.time), `${names.join("・")} 合同練習`, g.place);
+    });
+    settings.dojos.forEach(d => {
+      if(done.has(d.id) || !sel.has(d.id)) return;
+      const c = r.cells[d.id];
+      if(!c || c.off) return;
+      push(r.date, parseTime(c.time), `${d.name} 練習`, c.place);
+    });
+  });
+
+  L.push("END:VCALENDAR");
+  const blob = new Blob([L.join("\r\n")], { type:"text/calendar" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `練習予定_${wareki(curY)}${curM}月.ics`;
+  a.click(); URL.revokeObjectURL(a.href);
+  ovIcs.classList.remove("show");
+  toast(`カレンダーファイルを作成しました（${n}件）`);
+  openGuide();
+};
+
+/* ---------- 配布用説明文 ---------- */
+function openGuide(){
+  const label = `${wareki(curY)}${curM}月`;
+  document.getElementById("guideText").value =
+`【${label}の練習予定：カレンダー登録用ファイル】
+
+いつもありがとうございます。
+添付のファイル（練習予定_${label}.ics）を開くと、${curM}月の練習予定をスマホのカレンダーにまとめて登録できます。よろしければご利用ください。
+
+■iPhoneの方
+1. 添付ファイルをタップして開く
+2. 共有ボタン（四角に↑のマーク）をタップ
+3. 「カレンダー」を選び、「すべて追加」で登録完了
+※共有先に「カレンダー」が出ない場合は「その他」の中から選んでください
+
+■Androidの方
+1. 添付ファイルをタップして開く
+2. 「カレンダー」または「Googleカレンダー」を選ぶ
+3. 画面の案内にそって保存すれば登録完了
+
+■パソコンのGoogleカレンダーの方
+設定（歯車マーク）→「インポートとエクスポート」→「パソコンからファイルを選択」で取り込めます。
+
+※登録は任意です。内容は配布している練習日程表と同じです。
+※日程に変更があった場合は、改めてお知らせします。`;
+  document.getElementById("ovGuide").classList.add("show");
+}
+document.getElementById("btnGuideClose").onclick = () => document.getElementById("ovGuide").classList.remove("show");
+document.getElementById("btnGuideCopy").onclick = async () => {
+  const ta = document.getElementById("guideText");
+  try {
+    await navigator.clipboard.writeText(ta.value);
+    toast("コピーしました。LINEに貼り付けてください");
+  } catch(e){
+    /* クリップボードAPIが使えない環境向けの予備手段 */
+    ta.focus(); ta.select();
+    document.execCommand("copy");
+    toast("コピーしました。LINEに貼り付けてください");
+  }
 };
 
 /* ---------- 起動 ---------- */
