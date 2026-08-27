@@ -6,6 +6,8 @@
 <title>練習日程表メーカー</title>
 <!-- Excel生成ライブラリ（セル結合・塗りつぶし・罫線・印刷設定に対応） -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<!-- 画像出力ライブラリ（表をPNG画像に変換する） -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
   /* ===== 製図用紙をイメージしたデザイン ===== */
   :root {
@@ -126,6 +128,17 @@
     font-size: .85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 99;
   }
   .toast.show { opacity: 1; }
+
+  /* ===== 画像出力用の紙面スタイル（画面外で描画して撮影する） ===== */
+  .printsheet { background:#fff; color:#000; width:1360px; padding:28px 32px;
+    font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif; }
+  .printsheet table { border-collapse:collapse; width:100%; font-size:20px; }
+  .printsheet th, .printsheet td { border:1.5px solid #000; padding:5px 8px; text-align:center; white-space:nowrap; }
+  .printsheet .pttl { font-size:30px; font-weight:700; border:none; padding-bottom:10px; }
+  .printsheet .psub { text-align:left; font-weight:700; border:none; }
+  .printsheet tr.phl td { background:#ffff00; }
+  .printsheet .poff { letter-spacing:.4em; }
+  .printsheet .pnotice { color:#d00000; font-weight:700; border:none; }
 </style>
 </head>
 <body>
@@ -133,7 +146,7 @@
 <header>
   <div class="frame">
     <h1>練習日程表メーカー</h1>
-    <div class="sheetinfo num">SHEET: <span id="hdMonth">—</span>｜OUTPUT: A4横・1枚｜FORMAT: .xlsx / .ics</div>
+    <div class="sheetinfo num">SHEET: <span id="hdMonth">—</span>｜OUTPUT: A4横・1枚｜FORMAT: .xlsx / .ics / .png</div>
   </div>
 </header>
 
@@ -146,6 +159,7 @@
     <button class="ghost" id="btnAddRow">＋ 行を追加</button>
     <button class="ghost" id="btnRegen">パターンから再生成</button>
     <button class="ghost" id="btnSettings">⚙ 設定</button>
+    <button class="ghost" id="btnImg">画像出力</button>
     <button class="ghost" id="btnIcs">カレンダー出力</button>
     <button class="primary" id="btnExcel">Excelダウンロード</button>
   </div>
@@ -332,6 +346,7 @@ function generateRows(y, m){
     settings.dojos.forEach(dojo => {
       dojo.patterns.forEach(p => {
         if(+p.wd !== wd) return;
+        if(p.nth && +p.nth !== Math.ceil(d/7)) return;   // 第n曜日の指定（0または未設定なら毎週）
         const cell = { time: `${fmtTime(p.start)}～${fmtTime(p.end)}`, place: p.place, off:false };
         if(p.sep){ sepCells[dojo.id] = cell; hasSep = true; if(p.hl) sepHl = true; }
         else     { baseCells[dojo.id] = cell; hasBase = true; }
@@ -584,6 +599,7 @@ function renderDojoList(dojos){
       </div>
       ${d.patterns.map((p, j) => `
         <div class="pat-row" data-j="${j}">
+          <select class="pNth">${["毎週","第1","第2","第3","第4","第5"].map((t,k)=>`<option value="${k}" ${k==(p.nth||0)?"selected":""}>${t}</option>`).join("")}</select>
           <select class="pWd">${WD.map((w,k)=>`<option value="${k}" ${k==p.wd?"selected":""}>${w}曜</option>`).join("")}</select>
           <input type="time" class="pStart num" value="${p.start}">～<input type="time" class="pEnd num" value="${p.end}">
           <input type="text" class="pPlace" value="${esc(p.place)}" placeholder="場所">
@@ -600,7 +616,7 @@ function renderDojoList(dojos){
   wrap.querySelectorAll(".btnAddPat").forEach(b => b.onclick = e => {
     const i = +e.target.closest(".dojo-card").dataset.i;
     collectDojos();
-    editDojos[i].patterns.push({ wd:6, start:"18:00", end:"20:00", place:"", sep:false, hl:false });
+    editDojos[i].patterns.push({ nth:0, wd:6, start:"18:00", end:"20:00", place:"", sep:false, hl:false });
     renderDojoList(editDojos);
   });
   wrap.querySelectorAll(".btnDelPat").forEach(b => b.onclick = e => {
@@ -613,6 +629,7 @@ function collectDojos(){
     editDojos[i].name = card.querySelector(".dName").value;
     card.querySelectorAll(".pat-row").forEach((pr,j) => {
       const p = editDojos[i].patterns[j];
+      p.nth = +pr.querySelector(".pNth").value;
       p.wd = +pr.querySelector(".pWd").value;
       p.start = pr.querySelector(".pStart").value;
       p.end = pr.querySelector(".pEnd").value;
@@ -927,6 +944,77 @@ document.getElementById("btnGuideCopy").onclick = async () => {
     ta.focus(); ta.select();
     document.execCommand("copy");
     toast("コピーしました。LINEに貼り付けてください");
+  }
+};
+
+/* =====================================================
+   画像出力（PNG）
+   LINEにそのまま流せる横長の表画像を作る。
+   画面外に印刷風の表を組み立てて html2canvas で撮影する。
+   ===================================================== */
+function buildPrintTable(){
+  const rows = months[monthKey()].rows.slice().sort((a,b)=> a.date-b.date || a.order-b.order);
+  const nd = settings.dojos.length;
+  const totalCols = 2 + nd*2;
+  let h = `<table>`;
+  h += `<tr><td class="pttl" colspan="${totalCols}">${esc(settings.title)}</td></tr>`;
+  h += `<tr><td class="psub" colspan="${totalCols}">１．${wareki(curY)}${curM}月度練習日程表　（${esc(settings.sub)}）</td></tr>`;
+  h += `<tr><th rowspan="2">月 日</th><th rowspan="2">曜日</th>`;
+  settings.dojos.forEach(d => h += `<th colspan="2">${esc(d.name)}</th>`);
+  h += `</tr><tr>`;
+  settings.dojos.forEach(() => h += `<th>時 間</th><th>場 所</th>`);
+  h += `</tr>`;
+  rows.forEach(r => {
+    const wd = WD[new Date(curY, curM-1, r.date).getDay()];
+    h += `<tr${r.hl ? ' class="phl"' : ""}><td>${curM}月${r.date}日</td><td>${wd}</td>`;
+    if(r.type === "text"){
+      h += `<td colspan="${nd*2}">${esc(r.text)}</td>`;
+    } else {
+      buildSegments(r).forEach(sg => {
+        if(sg.joint){
+          const g = sg.joint;
+          h += g.off ? `<td class="poff" colspan="${sg.span*2}">休 み</td>`
+                     : `<td colspan="${sg.span*2}">${esc(g.time||"")}　${esc(g.place||"")}</td>`;
+        } else {
+          const c = r.cells[sg.dojo.id];
+          if(c && c.off)      h += `<td class="poff" colspan="2">休 み</td>`;
+          else if(c)          h += `<td>${esc(c.time)}</td><td>${esc(c.place)}</td>`;
+          else                h += `<td></td><td></td>`;
+        }
+      });
+    }
+    h += `</tr>`;
+  });
+  if(settings.notice.trim()){
+    h += `<tr><td class="pnotice" colspan="${totalCols}">≪ お 願 い ≫</td></tr>`;
+    settings.notice.trim().split("\n").forEach(line => {
+      h += `<tr><td class="pnotice" colspan="${totalCols}">${esc(line)}</td></tr>`;
+    });
+  }
+  h += `</table>`;
+  return h;
+}
+
+document.getElementById("btnImg").onclick = async () => {
+  if(settings.dojos.length === 0){ alert("先に「設定」で道場を登録してください。"); return; }
+  const div = document.createElement("div");
+  div.className = "printsheet";
+  div.style.position = "fixed"; div.style.left = "-99999px"; div.style.top = "0";
+  div.innerHTML = buildPrintTable();
+  document.body.appendChild(div);
+  try {
+    const canvas = await html2canvas(div, { scale: 2, backgroundColor: "#ffffff" });
+    div.remove();
+    canvas.toBlob(blob => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `練習日程表_${wareki(curY)}${curM}月度.png`;
+      a.click(); URL.revokeObjectURL(a.href);
+      toast("画像を作成しました。LINEにそのまま送れます");
+    }, "image/png");
+  } catch(e){
+    div.remove();
+    alert("画像の作成に失敗しました。時間をおいてもう一度お試しください。");
   }
 };
 
